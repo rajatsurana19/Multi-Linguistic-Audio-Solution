@@ -4,9 +4,11 @@ backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F0F8FF"
 textColor = "#2b2d42"
 font = "sans serif"
-
+hide_streamlit_markers = true
 [ui]
 hide_github = true
-
+[server]
 headless = true
 enableCORS = false
+
+
