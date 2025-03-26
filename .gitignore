@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.so
+.Python
+
+# Environment
+.env
+*.env
+secrets/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Build/dist
+build/
+dist/
+*.exe
+
+# Data files
+*.db
+*.sqlite
+*.log
+*.csv
+*.xlsx
+
+# Temporary files
+*.tmp
+temp/
+
+# Audio files
+*.mp3
+*.wav
+
+# Streamlit secrets
+.streamlit/secrets.toml
