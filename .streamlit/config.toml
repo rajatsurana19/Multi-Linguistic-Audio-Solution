@@ -10,5 +10,6 @@ hide_github = true
 [server]
 headless = true
 enableCORS = false
+maxUploadSize = 10
 
 
