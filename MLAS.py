@@ -302,20 +302,12 @@ LANGUAGE_TO_CODE = {
 @st.cache_resource
 def get_db_connection():
     try:
-        # Use Streamlit secrets (for cloud) or .env (for local)
-        MONGO_URI = st.secrets["MONGO_URI"] if "MONGO_URI" in st.secrets else os.getenv("MONGO_URI")
-        
-        if not MONGO_URI:
-            st.error("MongoDB URI not found. Check secrets or .env file.")
-            return None
-
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-        client.server_info()  # Test connection
-        return client["MultiLinguisticAudioSolution"]
-    
+        client = MongoClient("mongodb+srv://multilinguisticaudiosolution:v4noloVAiktXpOmf@multilinguisticaudiosol.uyguf.mongodb.net/?retryWrites=true&w=majority&appName=MultiLinguisticAudioSolution")
+        db = client["MultiLinguisticAudioSolution"]
+        return db
     except Exception as e:
-        st.warning(f"⚠️ Database connection failed: {e}")
-        return None  # Allows app to run in limited mode
+        logger.error(f"Database connection error: {e}")
+        return None
 
 # Initialize database collections
 def init_db():
@@ -445,6 +437,101 @@ def check_login():
         st.warning("Please log in to access this feature.")
         return False
     return True
+
+# Add this at the top of your file with other constants
+LAST_CLEANUP_KEY = "last_cleanup_run"
+
+def cleanup_old_files():
+    """
+    Cleans up old files and database records older than 30 days.
+    Runs maximum once per day using a file-based timestamp.
+    """
+    try:
+        # File to store last cleanup timestamp
+        LAST_CLEANUP_FILE = "last_cleanup.txt"
+        
+        # Check when we last ran cleanup
+        last_run = None
+        if os.path.exists(LAST_CLEANUP_FILE):
+            try:
+                with open(LAST_CLEANUP_FILE, "r") as f:
+                    last_run_str = f.read().strip()
+                    if last_run_str:
+                        last_run = datetime.fromisoformat(last_run_str)
+            except (ValueError, IOError) as e:
+                logger.warning(f"Could not read last cleanup time: {e}")
+        
+        # Only proceed if it's been more than 1 day since last run
+        if last_run and (datetime.now() - last_run) < timedelta(days=1):
+            logger.debug("Cleanup skipped - ran recently")
+            return
+            
+        now = datetime.now()
+        cutoff = now - timedelta(days=30)
+        deleted_files_count = 0
+        deleted_db_records = 0
+        
+        logger.info(f"Starting cleanup for files older than {cutoff.date()}")
+        
+        # 1. Clean permanent_outputs directory
+        if os.path.exists("permanent_outputs"):
+            for filename in os.listdir("permanent_outputs"):
+                filepath = os.path.join("permanent_outputs", filename)
+                try:
+                    if os.path.isfile(filepath):
+                        file_time = datetime.fromtimestamp(os.path.getmtime(filepath))
+                        if file_time < cutoff:
+                            os.remove(filepath)
+                            deleted_files_count += 1
+                            logger.debug(f"Deleted file: {filename}")
+                except Exception as e:
+                    logger.error(f"Error deleting {filename}: {e}")
+        
+        # 2. Clean MongoDB records
+        db = get_db_connection()
+        if db is not None:
+            try:
+                output_files = db["output_files"]
+                recent_activity = db["recent_activity"]
+                
+                # Find and delete old files
+                old_files = output_files.find({"timestamp": {"$lt": cutoff}})
+                for file in old_files:
+                    try:
+                        if "file_path" in file and os.path.exists(file["file_path"]):
+                            os.remove(file["file_path"])
+                            logger.debug(f"Deleted file: {file['file_path']}")
+                    except Exception as e:
+                        logger.error(f"Error deleting file {file.get('file_path', 'unknown')}: {e}")
+                
+                # Delete the records
+                files_result = output_files.delete_many({"timestamp": {"$lt": cutoff}})
+                activity_result = recent_activity.delete_many({"timestamp": {"$lt": cutoff}})
+                deleted_db_records = files_result.deleted_count + activity_result.deleted_count
+                
+            except Exception as e:
+                logger.error(f"Database cleanup error: {e}")
+        
+        # Update last run time
+        try:
+            with open(LAST_CLEANUP_FILE, "w") as f:
+                f.write(now.isoformat())
+        except IOError as e:
+            logger.error(f"Could not save cleanup timestamp: {e}")
+        
+        # Log summary
+        if deleted_files_count > 0 or deleted_db_records > 0:
+            logger.info(
+                f"Cleanup completed. "
+                f"Deleted {deleted_files_count} files and {deleted_db_records} database records."
+            )
+        else:
+            logger.info("No old records found for cleanup")
+            
+    except Exception as e:
+        logger.error(f"Critical error during cleanup: {e}")
+        raise  # Re-raise if you want the error to be visible
+
 
 # Get user activity
 def get_user_activity(user_id, limit=10):
@@ -1017,99 +1104,88 @@ def help_faq_page():
         3. Visit our GitHub repository to create an issue
         """)
 
-def process_audio_file(audio_file_path):
-    """Process audio file and return transcribed text"""
-    recognizer = sr.Recognizer()
-    try:
-        with sr.AudioFile(audio_file_path) as source:
-            audio_data = recognizer.record(source)
-            return recognizer.recognize_google(audio_data), None
-    except sr.UnknownValueError:
-        return None, "Speech Recognition could not understand the audio"
-    except sr.RequestError as e:
-        return None, f"Google Speech Recognition service error: {e}"
-    except Exception as e:
-        logger.error(f"Audio processing error: {e}\n{traceback.format_exc()}")
-        return None, f"Unexpected error: {e}"
-
-def save_transcription_result(text, original_filename, user_id):
-    """Save transcription result to file and database"""
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.txt', mode='w') as temp_text:
-            temp_text.write(text)
-            temp_text_path = temp_text.name
-        
-        permanent_path = create_permanent_copy(temp_text_path, 'txt')
-        if permanent_path:
-            save_recent_activity(
-                user_id, 
-                original_filename, 
-                "Audio", 
-                permanent_path
-            )
-            os.unlink(temp_text_path)
-            return permanent_path
-        return None
-    except Exception as e:
-        logger.error(f"Error saving transcription: {e}")
-        return None
-
+# Audio to Text Page - Improved
 def audio_to_text_page():
     if not check_login():
         return
-        
     st.header("Audio to Text Conversion")
-    st.info("Please ensure your audio file is under 10MB for best results.")
     
-    audio_file = st.file_uploader("Upload a WAV file", type=["wav"], label_visibility="visible")
+    # Add file size warning
+    st.warning("""
+    **Privacy Notice:** 
+    - Files are automatically deleted after 30 days for your privacy
+    - Maximum file size: 2MB
+    - Supported format: WAV
+    """)
     
-    if not audio_file:
-        show_feedback_form("audio_to_text")
-        return
+    # File uploader for audio
+    audio_file = st.file_uploader(
+        "Upload a WAV file (max 2MB)", 
+        type=["wav"], 
+        label_visibility="visible"
+    )
+    
+    if audio_file:
+        if audio_file.size > 2 * 1024 * 1024:
+            st.error("File size exceeds 2MB limit. Please upload a smaller file.")
+            return
         
-    st.audio(audio_file, format='audio/wav')
-    
-    if not st.button("Convert to Text", key="convert_audio_button"):
-        show_feedback_form("audio_to_text")
-        return
+        st.audio(audio_file, format='audio/wav')
         
-    with st.spinner("Processing audio..."):
-        # Create temporary audio file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
-            temp_audio.write(audio_file.getbuffer())
-            temp_audio_path = temp_audio.name
-        
-        try:
-            # Process audio
-            text, error = process_audio_file(temp_audio_path)
-            if error:
-                st.error(error)
-                return
-                
-            # Display results
-            st.subheader("Transcription Result:")
-            st.markdown(f'<div class="translated-text">{text}</div>', unsafe_allow_html=True)
-            
-            # Save results
-            saved_path = save_transcription_result(
-                text,
-                audio_file.name,
-                st.session_state.user["_id"]
-            )
-            
-            if saved_path:
-                st.markdown(get_download_link(saved_path, "Download Transcription Text"), 
-                            unsafe_allow_html=True)
-            else:
-                st.error("Failed to save transcription.")
-                
-        finally:
-            # Cleanup
-            try:
-                os.unlink(temp_audio_path)
-            except Exception as e:
-                logger.error(f"Error deleting temp audio file: {e}")
+        if st.button("Convert to Text", key="convert_audio_button"):
+            with st.spinner("Processing audio..."):
+                # Create a temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
+                    temp_audio.write(audio_file.getbuffer())
+                    temp_audio_path = temp_audio.name
+                                    
+                # Process the audio file
+                recognizer = sr.Recognizer()
+                try:
+                    with sr.AudioFile(temp_audio_path) as source:
+                        audio_data = recognizer.record(source)
+                        text = recognizer.recognize_google(audio_data)
+                    
+                    st.subheader("Transcription Result:")
+                    st.markdown(f'<div class="translated-text">{text}</div>', unsafe_allow_html=True)
+                    
+                    # Save text to file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.txt', mode='w') as temp_text:
+                        temp_text.write(text)
+                        temp_text_path = temp_text.name
+                    
+                    # Create permanent copy of the output text file
+                    permanent_text_path = create_permanent_copy(temp_text_path, 'txt')
+                    
+                    if permanent_text_path:
+                        # Save recent activity with output path
+                        activity_id = save_recent_activity(
+                            st.session_state.user["_id"], 
+                            audio_file.name, 
+                            "Audio", 
+                            permanent_text_path
+                        )
+                        
+                        # Provide download link
+                        st.markdown(get_download_link(permanent_text_path, "Download Transcription Text"), unsafe_allow_html=True)
+                        
+                        # Clean up temporary text file
+                        os.unlink(temp_text_path)
+                    else:
+                        st.error("Failed to save transcription file.")
+                        
+                except sr.UnknownValueError:
+                    st.error("Speech Recognition could not understand the audio.")
+                except sr.RequestError as e:
+                    st.error(f"Could not request results from Google Speech Recognition service: {e}")
+                except Exception as e:
+                    st.error(f"An unexpected error occurred: {e}")
+                    logger.error(f"Audio to text error: {e}\n{traceback.format_exc()}")
+                finally:
+                    # Clean up temporary file
+                    os.unlink(temp_audio_path)
     
+    # Always show feedback form
     show_feedback_form("audio_to_text")
 
 # PDF to Audio Page - Improved
@@ -1119,12 +1195,25 @@ def pdf_to_audio_page():
     st.header("PDF to Audio Conversion")
     
     # Add file size warning
-    st.info("Please ensure your PDF file is under 10MB for best results.")
+    st.warning("""
+    **Privacy Notice:** 
+    - Files are automatically deleted after 30 days for your privacy
+    - Maximum file size: 10MB
+    - Supported format: PDF
+    """)
     
     # File uploader for PDF
-    pdf_file = st.file_uploader("Upload a PDF file", type=["pdf"], label_visibility="visible")
+    pdf_file = st.file_uploader(
+        "Upload a PDF file (max 10MB)", 
+        type=["pdf"], 
+        label_visibility="visible"
+    )
     
     if pdf_file:
+        if pdf_file.size > 10 * 1024 * 1024:
+            st.error("File size exceeds 10MB limit. Please upload a smaller file.")
+            return
+        
         target_lang = st.selectbox(
             "Select target language for audio:", 
             list(LANGUAGE_TO_CODE.keys()),
@@ -1136,7 +1225,7 @@ def pdf_to_audio_page():
         if st.button("Convert to Audio", key="convert_pdf_button"):
             with st.spinner("Processing PDF..."):
                 # Create a temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
+                with tempfile.NamedTemporaryFile(deletae=False, suffix='.pdf') as temp_pdf:
                     temp_pdf.write(pdf_file.getbuffer())
                     temp_pdf_path = temp_pdf.name
                 
@@ -1306,6 +1395,7 @@ def main():
     load_css()
     header()
     
+    cleanup_old_files()
     # Initialize database
     init_db()
     
