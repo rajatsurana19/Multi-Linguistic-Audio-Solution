@@ -1225,7 +1225,7 @@ def pdf_to_audio_page():
         if st.button("Convert to Audio", key="convert_pdf_button"):
             with st.spinner("Processing PDF..."):
                 # Create a temporary file
-                with tempfile.NamedTemporaryFile(deletae=False, suffix='.pdf') as temp_pdf:
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
                     temp_pdf.write(pdf_file.getbuffer())
                     temp_pdf_path = temp_pdf.name
                 
