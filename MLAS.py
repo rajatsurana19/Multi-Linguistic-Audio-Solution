@@ -291,7 +291,7 @@ LANGUAGE_TO_CODE = {
     "French": "fr",
     "German": "de",
     "Japanese": "ja",
-    "Chinese": "zh-cn",
+    "Chinese": "zh-TW",
     "Russian": "ru",
     "Arabic": "ar",
     "Portuguese": "pt",
