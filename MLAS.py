@@ -10,7 +10,6 @@ import logging
 import base64
 import uuid
 import ffmpeg
-from langdetect import detect
 from pydub import AudioSegment
 from pydub.effects import normalize as effects_normalize
 from audio_recorder_streamlit import audio_recorder
@@ -290,27 +289,28 @@ def load_css():
 # Define language
 LANGUAGE_TO_CODE = {
     # Asian Languages
-    "English": "en",
-    "Hindi": "hi",
-    "Marathi": "mr",
-    "Bengali": "bn",
-    "Tamil": "ta",
-    "Telugu": "te",
-    "Urdu": "ur",
-    "Punjabi": "pa",
-    "Gujarati": "gu",
-    "Kannada": "kn",
-    "Malayalam": "ml",
+
     "Chinese (Traditional)": "zh-TW",
     "Japanese": "ja",
     "Korean": "ko",
+    "Hindi": "hi",
+    "Bengali": "bn",
+    "Tamil": "ta",
+    "Telugu": "te",
+    "Marathi": "mr",
+    "Urdu": "ur",
+    "English": "en",
     "Spanish": "es",
     "French": "fr",
     "German": "de",
     "Italian": "it",
     "Portuguese": "pt",
     "Russian": "ru",
-    "Arabic": "ar"
+    "Arabic": "ar",
+    "Punjabi": "pa",
+    "Gujarati": "gu",
+    "Kannada": "kn",
+    "Malayalam": "ml",
 }
 
 # Setup caching
@@ -453,7 +453,6 @@ def check_login():
         return False
     return True
 
-# Add this at the top of your file with other constants
 LAST_CLEANUP_KEY = "last_cleanup_run"
 
 def cleanup_old_files():
@@ -545,7 +544,7 @@ def cleanup_old_files():
             
     except Exception as e:
         logger.error(f"Critical error during cleanup: {e}")
-        raise  # Re-raise if you want the error to be visible
+        raise  
 
 
 # Get user activity
@@ -608,20 +607,49 @@ def get_download_link(file_path, link_text="Download"):
 
 
 def create_permanent_copy(temp_file_path, file_type):
+    """
+    Creates a permanent copy of a temporary file.
+    
+    Args:
+        temp_file_path (str): Path to the temporary file
+        file_type (str): Extension for the new file
+        
+    Returns:
+        str or None: Path to the permanent file if successful, None otherwise
+    """
     try:
+        # Check if the temporary file exists
+        if not os.path.exists(temp_file_path):
+            logger.error(f"Temporary file not found: {temp_file_path}")
+            return None
+            
+        # Create destination directory if it doesn't exist
         os.makedirs("permanent_outputs", exist_ok=True)
+        
+        # Generate unique filename with timestamp
         filename = f"{uuid.uuid4()}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_type}"
         permanent_path = os.path.join("permanent_outputs", filename)
+        
+        # Copy file contents
         with open(temp_file_path, "rb") as temp_file:
             with open(permanent_path, "wb") as perm_file:
                 perm_file.write(temp_file.read())
+                
+        logger.info(f"File successfully copied to {permanent_path}")
         return permanent_path
+        
+    except FileNotFoundError as e:
+        logger.error(f"File not found error: {e}")
+        return None
+    except PermissionError as e:
+        logger.error(f"Permission error when creating permanent copy: {e}")
+        return None
     except Exception as e:
-        logger.error(f"Error creating permanent copy: {e}")
+        logger.error(f"Unexpected error creating permanent copy: {e}")
         return None
 
 
-@st.cache_data(ttl=60)  # Cache for 60 seconds
+@st.cache_data(ttl=60)  
 def get_recent_activity(_user_id):
     db = get_db_connection()
     if db is None:
@@ -773,8 +801,6 @@ def dashboard_page():
     activity_count = activity_df.groupby("date").size().reset_index(name="count")
     st.line_chart(activity_count.set_index("date"))
 
-import streamlit as st
-
 def header():
     st.markdown(
         """
@@ -866,12 +892,12 @@ def header():
 
 
 
-@st.cache_data(ttl=3600)  # Cache translations for 1 hour
+@st.cache_data(ttl=3600)  
 def translate_text(text, target_lang, source_lang="auto", max_retries=3):
     """
     Translate text using GoogleTranslator with retry logic.
     """
-    for attempt in range(int(max_retries)):  # Ensure max_retries is an integer
+    for attempt in range(int(max_retries)): 
         try:
             translator = GoogleTranslator(source=source_lang, target=target_lang)
             translated_text = translator.translate(text)
@@ -887,12 +913,12 @@ def detect_pdf_language(text_sample):
     """
     try:
         from langdetect import detect
-        # Take a sample of the text for detection (first 500 chars for efficiency)
+        
         sample = text_sample[:500]
         lang = detect(sample)
         return lang
     except:
-        return "en"  # Default to English if detection fails
+        return "en"  
 
 def convert_pdf_to_audio(pdf_path, target_lang_code, source_lang=None, max_retries=3):
     try:
@@ -910,9 +936,9 @@ def convert_pdf_to_audio(pdf_path, target_lang_code, source_lang=None, max_retri
         # Extract text from each page with progress updates
         for i, page in enumerate(reader.pages):
             page_text = page.extract_text()
-            if page_text:  # Only add if text was extracted
+            if page_text:  
                 text += page_text + "\n"
-            progress_bar.progress((i + 1) / (total_pages + 3))  # +3 for detection, translation and audio steps
+            progress_bar.progress((i + 1) / (total_pages + 3))  
         
         # Determine source language
         if source_lang is None or source_lang == "Auto-detect":
@@ -1200,11 +1226,11 @@ def audio_to_text_page():
         "Punjabi": "pa",
         "Gujarati": "gu",
         "Kannada": "kn",
-        "Malayalam": "ml"
+        "Malayalam": "ml",
     }
     
     # Add file size warning
-    st.warning("""
+    st.info("""
     **Privacy Notice:** 
     - Files are automatically deleted after 30 days for your privacy
     - Maximum file size: 2MB
