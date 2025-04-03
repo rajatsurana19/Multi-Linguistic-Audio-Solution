@@ -9,6 +9,11 @@ import tempfile
 import logging
 import base64
 import uuid
+import ffmpeg
+from langdetect import detect
+from pydub import AudioSegment
+from pydub.effects import normalize as effects_normalize
+from audio_recorder_streamlit import audio_recorder
 import traceback
 from datetime import datetime, timedelta
 import pandas as pd
@@ -284,18 +289,28 @@ def load_css():
 
 # Define language
 LANGUAGE_TO_CODE = {
+    # Asian Languages
+    "English": "en",
     "Hindi": "hi",
     "Marathi": "mr",
-    "English": "en",
+    "Bengali": "bn",
+    "Tamil": "ta",
+    "Telugu": "te",
+    "Urdu": "ur",
+    "Punjabi": "pa",
+    "Gujarati": "gu",
+    "Kannada": "kn",
+    "Malayalam": "ml",
+    "Chinese (Traditional)": "zh-TW",
+    "Japanese": "ja",
+    "Korean": "ko",
     "Spanish": "es",
     "French": "fr",
     "German": "de",
-    "Japanese": "ja",
-    "Chinese": "zh-TW",
-    "Russian": "ru",
-    "Arabic": "ar",
+    "Italian": "it",
     "Portuguese": "pt",
-    "Italian": "it"
+    "Russian": "ru",
+    "Arabic": "ar"
 }
 
 # Setup caching
@@ -605,6 +620,7 @@ def create_permanent_copy(temp_file_path, file_type):
         logger.error(f"Error creating permanent copy: {e}")
         return None
 
+
 @st.cache_data(ttl=60)  # Cache for 60 seconds
 def get_recent_activity(_user_id):
     db = get_db_connection()
@@ -865,42 +881,70 @@ def translate_text(text, target_lang, source_lang="auto", max_retries=3):
             time.sleep(1)  # Wait before retrying
     return None, f"Translation failed after {max_retries} attempts"
 
-# Function to convert PDF to audio (enhanced with progress tracking)
-def convert_pdf_to_audio(pdf_path, lang_code, max_retries=3):
+def detect_pdf_language(text_sample):
+    """
+    Try to detect the language of the PDF text using langdetect
+    """
+    try:
+        from langdetect import detect
+        # Take a sample of the text for detection (first 500 chars for efficiency)
+        sample = text_sample[:500]
+        lang = detect(sample)
+        return lang
+    except:
+        return "en"  # Default to English if detection fails
+
+def convert_pdf_to_audio(pdf_path, target_lang_code, source_lang=None, max_retries=3):
     try:
         # Read PDF content
         reader = PdfReader(pdf_path)
         text = ""
         
         # Initialize progress bar
-        progress_bar = st.progress(0)
+        if 'progress_bar' not in st.session_state:
+            st.session_state.progress_bar = st.progress(0)
+        progress_bar = st.session_state.progress_bar
+        
         total_pages = len(reader.pages)
         
         # Extract text from each page with progress updates
         for i, page in enumerate(reader.pages):
-            text += page.extract_text() + "\n"
-            progress_bar.progress((i + 1) / (total_pages + 2))  # +2 for translation and audio steps
+            page_text = page.extract_text()
+            if page_text:  # Only add if text was extracted
+                text += page_text + "\n"
+            progress_bar.progress((i + 1) / (total_pages + 3))  # +3 for detection, translation and audio steps
         
-        # Translate the text if necessary (English is default for most PDFs)
-        if lang_code != "en":
-            st.text("Translating PDF content...")
-            translated_text, error = translate_text(text, lang_code)
+        # Determine source language
+        if source_lang is None or source_lang == "Auto-detect":
+            st.text("Detecting PDF language...")
+            source_lang = detect_pdf_language(text)
+            if source_lang not in LANGUAGE_TO_CODE.values():
+                source_lang = "en"  # Default to English if detection fails
+        progress_bar.progress((total_pages + 1) / (total_pages + 3))
+        
+        # Translate the text if necessary
+        if source_lang != target_lang_code:
+            st.text(f"Translating from {source_lang} to {target_lang_code}...")
+            translated_text, error = translate_text(text, target_lang_code, source_lang=source_lang)
             if error:
                 return None, error
             text = translated_text
         
-        progress_bar.progress((total_pages + 1) / (total_pages + 2))
+        progress_bar.progress((total_pages + 2) / (total_pages + 3))
         
         # Convert text to speech
         st.text("Converting to speech...")
         with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as temp_audio:
             temp_path = temp_audio.name
-            tts = gTTS(text=text, lang=lang_code, slow=False)
-            tts.save(temp_path)
+            try:
+                tts = gTTS(text=text, lang=target_lang_code, slow=False)
+                tts.save(temp_path)
+            except Exception as e:
+                return None, f"Text-to-speech conversion failed: {str(e)}"
             
         progress_bar.progress(1.0)
-        time.sleep(0.5)  # Small delay to show completed progress
-        progress_bar.empty()  # Remove progress bar
+        time.sleep(0.5)
+        progress_bar.empty()
         
         return temp_path, None
         
@@ -908,7 +952,7 @@ def convert_pdf_to_audio(pdf_path, lang_code, max_retries=3):
         error_traceback = traceback.format_exc()
         logger.error(f"PDF to Audio error: {e}\n{error_traceback}")
         return None, f"Error processing PDF: {e}"
-
+    
 # Function to convert text to speech
 def text_to_speech(text, lang_code, max_retries=3):
     for attempt in range(max_retries):
@@ -1068,18 +1112,27 @@ def help_faq_page():
     with st.expander("What languages are supported?"):
         st.write("""
         We currently support the following languages:
-        - Hindi
         - English
+        - Hindi
+        - Marathi
+        - Bengali
+        - Tamil
+        - Telugu
+        - Urdu
+        - Punjabi
+        - Gujarati
+        - Kannada
+        - Malayalam
+        - Chinese (Traditional)
+        - Japanese
+        - Korean
         - Spanish
         - French
         - German
-        - Japanese
-        - Chinese
+        - Italian
+        - Portuguese
         - Russian
         - Arabic
-        - Portuguese
-        - Italian
-        - Marathi
         
         More languages may be added in future updates.
         """)
@@ -1105,96 +1158,331 @@ def help_faq_page():
         """)
 
 # Audio to Text Page - Improved
+import os
+import tempfile
+import traceback
+import logging
+import streamlit as st
+import speech_recognition as sr
+from pydub import AudioSegment
+from pydub.effects import normalize as effects_normalize
+from audio_recorder_streamlit import audio_recorder
+import uuid
+
+# Setup logger
+logger = logging.getLogger(__name__)
+
 def audio_to_text_page():
     if not check_login():
         return
     st.header("Audio to Text Conversion")
+    
+    # Define language codes (already defined in your app)
+    LANGUAGE_TO_CODE = {
+        # Asian Languages
+        "Chinese (Traditional)": "zh-TW",
+        "Japanese": "ja",
+        "Korean": "ko",
+        "Hindi": "hi",
+        "Bengali": "bn",
+        "Tamil": "ta",
+        "Telugu": "te",
+        "Marathi": "mr",
+        "Urdu": "ur",
+        "English": "en",
+        "Spanish": "es",
+        "French": "fr",
+        "German": "de",
+        "Italian": "it",
+        "Portuguese": "pt",
+        "Russian": "ru",
+        "Arabic": "ar",
+        "Punjabi": "pa",
+        "Gujarati": "gu",
+        "Kannada": "kn",
+        "Malayalam": "ml"
+    }
     
     # Add file size warning
     st.warning("""
     **Privacy Notice:** 
     - Files are automatically deleted after 30 days for your privacy
     - Maximum file size: 2MB
-    - Supported format: WAV
+    - Supported formats: WAV, MP3, FLAC
     """)
     
-    # File uploader for audio
-    audio_file = st.file_uploader(
-        "Upload a WAV file (max 2MB)", 
-        type=["wav"], 
-        label_visibility="visible"
-    )
+    # Create tabs for different input methods
+    tab1, tab2 = st.tabs(["Upload Audio File", "Record Audio"])
     
-    if audio_file:
-        if audio_file.size > 2 * 1024 * 1024:
-            st.error("File size exceeds 2MB limit. Please upload a smaller file.")
-            return
+    # Language selection
+    selected_language = st.selectbox(
+        "Select Language",
+        options=list(LANGUAGE_TO_CODE.keys()),
+        index=list(LANGUAGE_TO_CODE.keys()).index("English") if "English" in LANGUAGE_TO_CODE else 0
+    )
+    language_code = LANGUAGE_TO_CODE[selected_language]
+    
+    with tab1:
+        # File uploader for audio
+        audio_file = st.file_uploader(
+            "Upload an audio file (max 2MB)", 
+            type=["wav", "mp3", "flac"], 
+            label_visibility="visible"
+        )
         
-        st.audio(audio_file, format='audio/wav')
-        
-        if st.button("Convert to Text", key="convert_audio_button"):
-            with st.spinner("Processing audio..."):
-                # Create a temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
-                    temp_audio.write(audio_file.getbuffer())
-                    temp_audio_path = temp_audio.name
-                                    
-                # Process the audio file
-                recognizer = sr.Recognizer()
+        if audio_file:
+            # Check file size
+            if audio_file.size > 2 * 1024 * 1024:
+                st.error("File size exceeds 2MB limit. Please upload a smaller file.")
+            else:
                 try:
-                    with sr.AudioFile(temp_audio_path) as source:
-                        audio_data = recognizer.record(source)
-                        text = recognizer.recognize_google(audio_data)
+                    # Display audio player
+                    st.audio(audio_file)
                     
-                    st.subheader("Transcription Result:")
-                    st.markdown(f'<div class="translated-text">{text}</div>', unsafe_allow_html=True)
-                    
-                    # Save text to file
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.txt', mode='w') as temp_text:
-                        temp_text.write(text)
-                        temp_text_path = temp_text.name
-                    
-                    # Create permanent copy of the output text file
-                    permanent_text_path = create_permanent_copy(temp_text_path, 'txt')
-                    
-                    if permanent_text_path:
-                        # Save recent activity with output path
-                        activity_id = save_recent_activity(
-                            st.session_state.user["_id"], 
-                            audio_file.name, 
-                            "Audio", 
-                            permanent_text_path
-                        )
-                        
-                        # Provide download link
-                        st.markdown(get_download_link(permanent_text_path, "Download Transcription Text"), unsafe_allow_html=True)
-                        
-                        # Clean up temporary text file
-                        os.unlink(temp_text_path)
-                    else:
-                        st.error("Failed to save transcription file.")
-                        
-                except sr.UnknownValueError:
-                    st.error("Speech Recognition could not understand the audio.")
-                except sr.RequestError as e:
-                    st.error(f"Could not request results from Google Speech Recognition service: {e}")
+                    if st.button("Convert to Text", key="convert_uploaded_audio"):
+                        process_uploaded_audio(audio_file, language_code)
                 except Exception as e:
-                    st.error(f"An unexpected error occurred: {e}")
-                    logger.error(f"Audio to text error: {e}\n{traceback.format_exc()}")
-                finally:
-                    # Clean up temporary file
-                    os.unlink(temp_audio_path)
+                    st.error(f"Error playing audio file: {str(e)}")
+                    logger.error(f"Audio playback error: {e}\n{traceback.format_exc()}")
+    
+    with tab2:
+        st.write("Record your voice directly:")
+        
+        try:
+            # Use audio recorder component
+            audio_bytes = audio_recorder()
+            
+            if audio_bytes:
+                # Display the recorded audio
+                st.audio(audio_bytes, format="audio/wav")
+                
+                if st.button("Convert to Text", key="convert_recorded_audio"):
+                    process_recorded_audio(audio_bytes, language_code)
+        except Exception as e:
+            st.error(f"Error recording audio: {str(e)}. Make sure your microphone is connected and browser permissions are granted.")
+            logger.error(f"Audio recording error: {e}\n{traceback.format_exc()}")
     
     # Always show feedback form
     show_feedback_form("audio_to_text")
+
+
+def process_uploaded_audio(audio_file, language_code):
+    """Process uploaded audio file and convert to text."""
+    with st.spinner("Processing audio..."):
+        # Create a unique temporary file name
+        file_extension = os.path.splitext(audio_file.name)[1].lower()
+        if not file_extension:
+            file_extension = '.wav'  # Default extension
+        
+        # Create a temporary file
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_audio:
+                temp_audio.write(audio_file.getbuffer())
+                temp_audio_path = temp_audio.name
+                
+            try:
+                # Convert the audio to text
+                text = convert_audio_to_text(temp_audio_path, language_code)
+                
+                # Display and save the transcription
+                display_and_save_transcription(text, audio_file.name)
+                    
+            except sr.UnknownValueError:
+                st.error("Speech Recognition could not understand the audio. Try speaking more clearly or using a different audio file.")
+            except sr.RequestError as e:
+                st.error(f"Could not request results from Speech Recognition service: {e}. Check your internet connection.")
+            except FileNotFoundError:
+                st.error("The audio file was not found or is corrupted. Please try again with a different file.")
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {str(e)}")
+                logger.error(f"Audio to text error: {e}\n{traceback.format_exc()}")
+            finally:
+                # Clean up temporary file
+                try:
+                    if os.path.exists(temp_audio_path):
+                        os.unlink(temp_audio_path)
+                except Exception as e:
+                    logger.error(f"Error deleting temporary file: {e}")
+        except Exception as e:
+            st.error(f"Error creating temporary file: {str(e)}")
+            logger.error(f"Temporary file error: {e}\n{traceback.format_exc()}")
+
+
+def process_recorded_audio(audio_bytes, language_code):
+    """Process recorded audio bytes and convert to text."""
+    with st.spinner("Processing audio..."):
+        # Create a temporary file
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as temp_audio:
+                temp_audio.write(audio_bytes)
+                temp_audio_path = temp_audio.name
+                
+            try:
+                # Convert the audio to text
+                text = convert_audio_to_text(temp_audio_path, language_code)
+                
+                # Display and save the transcription
+                display_and_save_transcription(text, "recorded_audio.wav")
+                    
+            except sr.UnknownValueError:
+                st.error("Speech Recognition could not understand the audio. Try speaking more clearly or closer to the microphone.")
+            except sr.RequestError as e:
+                st.error(f"Could not request results from Speech Recognition service: {e}. Check your internet connection.")
+            except Exception as e:
+                st.error(f"An unexpected error occurred: {str(e)}")
+                logger.error(f"Audio to text error: {e}\n{traceback.format_exc()}")
+            finally:
+                # Clean up temporary file
+                try:
+                    if os.path.exists(temp_audio_path):
+                        os.unlink(temp_audio_path)
+                except Exception as e:
+                    logger.error(f"Error deleting temporary file: {e}")
+        except Exception as e:
+            st.error(f"Error creating temporary file: {str(e)}")
+            logger.error(f"Temporary file error: {e}\n{traceback.format_exc()}")
+
+
+def convert_audio_to_text(audio_path, language_code):
+    """Convert audio file to text using multiple speech recognition engines for better accuracy."""
+    # Initialize recognizer
+    recognizer = sr.Recognizer()
+    
+    # Apply noise reduction and format conversion if needed
+    try:
+        # If file is not WAV, convert to WAV using pydub
+        if not audio_path.lower().endswith('.wav'):
+            try:
+                audio = AudioSegment.from_file(audio_path)
+                wav_path = audio_path.rsplit('.', 1)[0] + '.wav'
+                audio.export(wav_path, format="wav")
+                audio_path = wav_path
+            except Exception as e:
+                logger.error(f"Error converting audio format: {e}")
+                # Continue with original file if conversion fails
+        
+        # Attempt to apply noise reduction and normalization
+        try:
+            sound = AudioSegment.from_file(audio_path, format="wav")
+            normalized_sound = effects_normalize(sound)
+            normalized_sound.export(audio_path, format="wav")
+        except Exception as e:
+            logger.error(f"Error normalizing audio: {e}")
+            # Continue with original file if normalization fails
+        
+        # Process the audio file with speech recognition
+        with sr.AudioFile(audio_path) as source:
+            # Adjust for ambient noise
+            try:
+                recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            except Exception as e:
+                logger.error(f"Error adjusting for ambient noise: {e}")
+                # Continue without noise adjustment if it fails
+            
+            # Record the audio
+            audio_data = recognizer.record(source)
+        
+        # Initialize result variable
+        text = ""
+        success = False
+        error_messages = []
+        
+        # Try multiple speech recognition services for better accuracy
+        # 1. Try Google Speech Recognition first (most accurate for most languages)
+        try:
+            text = recognizer.recognize_google(audio_data, language=language_code)
+            success = True
+        except Exception as e:
+            error_messages.append(f"Google Speech API error: {str(e)}")
+            
+        # 2. If Google fails, try Whisper (better for noisy environments)
+        if not success:
+            try:
+                text = recognizer.recognize_whisper(audio_data)
+                success = True
+            except Exception as e:
+                error_messages.append(f"Whisper API error: {str(e)}")
+        
+        # 3. If both fail, try Sphinx (offline recognition, only for English)
+        if not success and language_code.startswith('en'):
+            try:
+                text = recognizer.recognize_sphinx(audio_data)
+                success = True
+            except Exception as e:
+                error_messages.append(f"Sphinx error: {str(e)}")
+        
+        # If all methods fail, raise an exception
+        if not success:
+            error_details = ". ".join(error_messages)
+            logger.error(f"All speech recognition methods failed: {error_details}")
+            raise sr.UnknownValueError("Could not recognize speech in the audio")
+        
+        return text
+        
+    except Exception as e:
+        logger.error(f"Error in convert_audio_to_text: {e}\n{traceback.format_exc()}")
+        raise
+
+
+def display_and_save_transcription(text, original_filename):
+    """Display the transcription results and save to file."""
+    try:
+        st.subheader("Transcription Result:")
+        st.markdown(f'<div class="translated-text">{text}</div>', unsafe_allow_html=True)
+        
+        # Text editing option
+        edited_text = st.text_area("Edit transcription if needed:", value=text, height=150)
+        
+        if st.button("Save Edited Text"):
+            text = edited_text
+        
+        # Save text to file
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.txt', mode='w', encoding='utf-8') as temp_text:
+                temp_text.write(text)
+                temp_text_path = temp_text.name
+            
+            # Create permanent copy of the output text file
+            permanent_text_path = create_permanent_copy(temp_text_path, 'txt', )
+            
+            if permanent_text_path:
+                # Save recent activity with output path
+                try:
+                    activity_id = save_recent_activity(
+                        st.session_state.user["_id"], 
+                        original_filename, 
+                        "Audio", 
+                        permanent_text_path
+                    )
+                except Exception as e:
+                    logger.error(f"Error saving activity: {e}")
+                    # Continue even if activity saving fails
+                
+                # Provide download link
+                st.markdown(get_download_link(permanent_text_path, "Download Transcription Text"), unsafe_allow_html=True)
+                
+                # Clean up temporary text file
+                try:
+                    if os.path.exists(temp_text_path):
+                        os.unlink(temp_text_path)
+                except Exception as e:
+                    logger.error(f"Error deleting temporary text file: {e}")
+            else:
+                st.error("Failed to save transcription file.")
+        except Exception as e:
+            st.error(f"Error saving transcription: {str(e)}")
+            logger.error(f"Transcription saving error: {e}\n{traceback.format_exc()}")
+            
+    except Exception as e:
+        st.error(f"Error displaying transcription: {str(e)}")
+        logger.error(f"Display error: {e}\n{traceback.format_exc()}")
 
 # PDF to Audio Page - Improved
 def pdf_to_audio_page():
     if not check_login():
         return
-    st.header("PDF to Audio Conversion")
     
-    # Add file size warning
+    st.header("PDF to Audio Conversion")
     st.warning("""
     **Privacy Notice:** 
     - Files are automatically deleted after 30 days for your privacy
@@ -1202,7 +1490,6 @@ def pdf_to_audio_page():
     - Supported format: PDF
     """)
     
-    # File uploader for PDF
     pdf_file = st.file_uploader(
         "Upload a PDF file (max 10MB)", 
         type=["pdf"], 
@@ -1214,55 +1501,63 @@ def pdf_to_audio_page():
             st.error("File size exceeds 10MB limit. Please upload a smaller file.")
             return
         
-        target_lang = st.selectbox(
-            "Select target language for audio:", 
-            list(LANGUAGE_TO_CODE.keys()),
-            index=list(LANGUAGE_TO_CODE.keys()).index("English"),
-            key="pdf_lang",
-            label_visibility="visible"
-        )
+        col1, col2 = st.columns(2)
+        with col1:
+            source_lang = st.selectbox(
+                "Select PDF source language (or auto-detect):",
+                ["Auto-detect"] + list(LANGUAGE_TO_CODE.keys()),
+                key="pdf_source_lang"
+            )
         
-        if st.button("Convert to Audio", key="convert_pdf_button"):
+        with col2:
+            target_lang = st.selectbox(
+                "Select target language for audio:", 
+                list(LANGUAGE_TO_CODE.keys()),
+                index=list(LANGUAGE_TO_CODE.keys()).index("English"),
+                key="pdf_target_lang"
+            )
+        
+        if st.button("Convert to Audio"):
             with st.spinner("Processing PDF..."):
-                # Create a temporary file
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
-                    temp_pdf.write(pdf_file.getbuffer())
-                    temp_pdf_path = temp_pdf.name
-                
-                # Process the PDF file
-                audio_path, error = convert_pdf_to_audio(temp_pdf_path, LANGUAGE_TO_CODE[target_lang])
-                
-                # Clean up PDF temp file
-                os.unlink(temp_pdf_path)
-                
-                if audio_path:
-                    st.success(f"PDF successfully converted to {target_lang} audio!")
-                    st.subheader("Audio Output:")
-                    st.audio(audio_path, format='audio/mp3')
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as temp_pdf:
+                        temp_pdf.write(pdf_file.getbuffer())
+                        temp_pdf_path = temp_pdf.name
                     
-                    # Create permanent copy of the output audio file
-                    permanent_audio_path = create_permanent_copy(audio_path, 'mp3')
+                    target_lang_code = LANGUAGE_TO_CODE[target_lang]
+                    source_lang_code = LANGUAGE_TO_CODE[source_lang] if source_lang != "Auto-detect" else None
                     
-                    if permanent_audio_path:
-                        # Save recent activity with output path
-                        activity_id = save_recent_activity(
-                            st.session_state.user["_id"], 
-                            pdf_file.name, 
-                            "PDF", 
-                            permanent_audio_path
-                        )
+                    audio_path, error = convert_pdf_to_audio(
+                        temp_pdf_path, 
+                        target_lang_code,
+                        source_lang=source_lang_code
+                    )
+                    
+                    if temp_pdf_path and os.path.exists(temp_pdf_path):
+                        os.unlink(temp_pdf_path)
+                    
+                    if error:
+                        st.error(f"Conversion failed: {error}")
+                    elif audio_path:
+                        st.success(f"Successfully converted to {target_lang} audio!")
+                        st.audio(audio_path, format='audio/mp3')
                         
-                        # Add download link
-                        st.markdown(get_download_link(permanent_audio_path, "Download Audio File"), unsafe_allow_html=True)
-                        
-                        # Clean up temporary audio file
-                        os.unlink(audio_path)
-                    else:
-                        st.error("Failed to save audio file.")
-                else:
-                    st.error(f"Error: {error}")
+                        permanent_audio_path = create_permanent_copy(audio_path, 'mp3')
+                        if permanent_audio_path:
+                            save_recent_activity(
+                                st.session_state.user["_id"], 
+                                pdf_file.name, 
+                                "PDF", 
+                                permanent_audio_path
+                            )
+                            st.markdown(get_download_link(permanent_audio_path, "Download Audio File"), 
+                                       unsafe_allow_html=True)
+                            os.unlink(audio_path)
+                        else:
+                            st.error("Failed to save audio file.")
+                except Exception as e:
+                    st.error(f"An unexpected error occurred: {str(e)}")
     
-    # Always show feedback form
     show_feedback_form("pdf_to_audio")
 
 # Text-to-Speech Page - Improved (Continued)
